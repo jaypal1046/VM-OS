@@ -38,6 +38,9 @@ static pthread_t g_vm_thread;
 static pthread_mutex_t g_vm_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_vm_cond = PTHREAD_COND_INITIALIZER;
 static int g_thread_running = 0;
+// Serialize initialization and teardown across the interval spent joining a worker.
+static pthread_mutex_t g_lifecycle_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int vm_engine_stop_locked(void);
 
 static void* vm_thread_func(void* arg) {
     (void)arg;
@@ -60,23 +63,24 @@ static void* vm_thread_func(void* arg) {
             break;
         }
 
-        g_vm.total_instructions += 1000;
-        pthread_mutex_unlock(&g_vm_mutex);
+        // The current runtime executes the host compositor, not guest instructions.
 
         // 1. Step guest compositor and check UART messages
         compositor_tick();
+        g_vm.display_mode = compositor_get_mode();
 
         // 2. Render frame to linear framebuffer
         int fb_w = 0, fb_h = 0;
+        display_bridge_lock_fb();
         uint32_t* fb = display_bridge_get_fb(&fb_w, &fb_h);
         if (fb && fb_w > 0 && fb_h > 0) {
-            display_bridge_lock_fb();
             compositor_render(fb, fb_w, fb_h);
-            display_bridge_unlock_fb();
-
-            // 3. Blit to ANativeWindow
-            display_bridge_render_frame();
         }
+        display_bridge_unlock_fb();
+        pthread_mutex_unlock(&g_vm_mutex);
+
+        // Present outside the VM lock so a slow surface does not block input.
+        display_bridge_render_frame();
 
         // Target ~60 FPS (16.6 ms per frame)
         usleep(16600);
@@ -86,8 +90,13 @@ static void* vm_thread_func(void* arg) {
     return NULL;
 }
 
-int vm_engine_init(const char* guest_img_path) {
+static int vm_engine_init_locked(const char* guest_img_path) {
     pthread_mutex_lock(&g_vm_mutex);
+
+    if (g_thread_running) {
+        pthread_mutex_unlock(&g_vm_mutex);
+        return -1;
+    }
 
     if (g_vm.ram == NULL) {
         g_vm.ram = (uint8_t*)malloc(GUEST_RAM_SIZE);
@@ -100,15 +109,25 @@ int vm_engine_init(const char* guest_img_path) {
     }
 
     if (guest_img_path && strlen(guest_img_path) > 0) {
-        strncpy(g_vm.guest_image_path, guest_img_path, sizeof(g_vm.guest_image_path) - 1);
-        FILE* f = fopen(guest_img_path, "rb");
-        if (f) {
-            size_t bytes_read = fread(g_vm.ram, 1, GUEST_RAM_SIZE, f);
-            fclose(f);
-            LOGI("Loaded %zu bytes from guest OS image: %s", bytes_read, guest_img_path);
-        } else {
-            LOGI("Guest OS image file not found or inaccessible; initializing default firmware.");
+        if (guest_img_path != g_vm.guest_image_path) {
+            snprintf(g_vm.guest_image_path, sizeof(g_vm.guest_image_path), "%s", guest_img_path);
         }
+        FILE* f = fopen(guest_img_path, "rb");
+        if (!f) {
+            LOGE("Guest image could not be opened");
+            goto init_failed;
+        }
+        memset(g_vm.ram, 0, GUEST_RAM_SIZE);
+        size_t bytes_read = fread(g_vm.ram, 1, GUEST_RAM_SIZE, f);
+        int extra = fgetc(f);
+        int valid = !ferror(f) && extra == EOF && bytes_read >= 32 &&
+                    memcmp(g_vm.ram, "SPLITOS\0", 8) == 0;
+        fclose(f);
+        if (!valid) {
+            LOGE("Invalid or oversized guest image");
+            goto init_failed;
+        }
+        LOGI("Loaded %zu bytes from guest OS image: %s", bytes_read, guest_img_path);
     }
 
     // Allocate snapshot buffers
@@ -120,7 +139,13 @@ int vm_engine_init(const char* guest_img_path) {
         g_snapshot_compositor = malloc(g_snapshot_compositor_size);
     }
 
-    display_bridge_init(DEFAULT_FB_WIDTH, DEFAULT_FB_HEIGHT);
+    if (!g_snapshot_ram || !g_snapshot_compositor) {
+        LOGE("Failed to allocate snapshot buffers");
+        goto init_failed;
+    }
+    if (display_bridge_init(DEFAULT_FB_WIDTH, DEFAULT_FB_HEIGHT) != 0) {
+        goto init_failed;
+    }
     compositor_init(g_vm.display_mode);
 
     g_vm.state = VM_STATE_STOPPED;
@@ -130,10 +155,29 @@ int vm_engine_init(const char* guest_img_path) {
     pthread_mutex_unlock(&g_vm_mutex);
     LOGI("VM Engine initialized successfully.");
     return 0;
+
+init_failed:
+    free(g_vm.ram);
+    g_vm.ram = NULL;
+    free(g_snapshot_ram);
+    g_snapshot_ram = NULL;
+    free(g_snapshot_compositor);
+    g_snapshot_compositor = NULL;
+    display_bridge_cleanup();
+    pthread_mutex_unlock(&g_vm_mutex);
+    return -1;
+}
+
+int vm_engine_init(const char* guest_img_path) {
+    pthread_mutex_lock(&g_lifecycle_mutex);
+    int result = vm_engine_init_locked(guest_img_path);
+    pthread_mutex_unlock(&g_lifecycle_mutex);
+    return result;
 }
 
 void vm_engine_cleanup(void) {
-    vm_engine_stop();
+    pthread_mutex_lock(&g_lifecycle_mutex);
+    vm_engine_stop_locked();
 
     pthread_mutex_lock(&g_vm_mutex);
     if (g_vm.ram) {
@@ -153,41 +197,42 @@ void vm_engine_cleanup(void) {
     display_bridge_cleanup();
     pthread_mutex_unlock(&g_vm_mutex);
 
+    pthread_mutex_unlock(&g_lifecycle_mutex);
     LOGI("VM Engine cleaned up.");
 }
 
 int vm_engine_start(void) {
+    int result = 0;
+    pthread_mutex_lock(&g_lifecycle_mutex);
     pthread_mutex_lock(&g_vm_mutex);
     if (g_vm.state == VM_STATE_RUNNING) {
-        pthread_mutex_unlock(&g_vm_mutex);
-        return 1;
+        result = 1;
+        goto done;
     }
+    if (g_vm.state == VM_STATE_PAUSED) goto done;
 
     if (!g_vm.ram) {
         pthread_mutex_unlock(&g_vm_mutex);
-        if (vm_engine_init(g_vm.guest_image_path) != 0) {
-            return 0;
-        }
+        int initialized = vm_engine_init_locked(g_vm.guest_image_path);
         pthread_mutex_lock(&g_vm_mutex);
+        if (initialized != 0) goto done;
     }
 
     g_vm.state = VM_STATE_RUNNING;
     g_thread_running = 1;
-
-    if (pthread_create(&g_vm_thread, NULL, vm_thread_func, NULL) != 0) {
+    result = pthread_create(&g_vm_thread, NULL, vm_thread_func, NULL) == 0;
+    if (!result) {
         LOGE("Failed to spawn VM execution pthread");
         g_vm.state = VM_STATE_STOPPED;
         g_thread_running = 0;
-        pthread_mutex_unlock(&g_vm_mutex);
-        return 0;
     }
-
+done:
     pthread_mutex_unlock(&g_vm_mutex);
-    LOGI("VM Engine started successfully.");
-    return 1;
+    pthread_mutex_unlock(&g_lifecycle_mutex);
+    return result;
 }
 
-int vm_engine_stop(void) {
+static int vm_engine_stop_locked(void) {
     pthread_mutex_lock(&g_vm_mutex);
     if (g_vm.state == VM_STATE_STOPPED && !g_thread_running) {
         pthread_mutex_unlock(&g_vm_mutex);
@@ -204,6 +249,13 @@ int vm_engine_stop(void) {
     return 1;
 }
 
+int vm_engine_stop(void) {
+    pthread_mutex_lock(&g_lifecycle_mutex);
+    int result = vm_engine_stop_locked();
+    pthread_mutex_unlock(&g_lifecycle_mutex);
+    return result;
+}
+
 int vm_engine_pause(void) {
     pthread_mutex_lock(&g_vm_mutex);
     if (g_vm.state != VM_STATE_RUNNING) {
@@ -213,7 +265,7 @@ int vm_engine_pause(void) {
 
     g_vm.state = VM_STATE_PAUSED;
 
-    // Capture instantaneous RAM & Compositor snapshot
+    // shortcut: snapshot stays in memory; add disk persistence for process-death recovery.
     if (g_vm.ram && g_snapshot_ram) {
         memcpy(g_snapshot_ram, g_vm.ram, GUEST_RAM_SIZE);
     }
@@ -233,6 +285,7 @@ int vm_engine_resume(void) {
         return 0;
     }
 
+    int display_mode = compositor_get_mode();
     // Restore RAM & Compositor snapshot
     if (g_vm.ram && g_snapshot_ram) {
         memcpy(g_vm.ram, g_snapshot_ram, GUEST_RAM_SIZE);
@@ -240,6 +293,8 @@ int vm_engine_resume(void) {
     if (g_snapshot_compositor) {
         compositor_restore_snapshot(g_snapshot_compositor);
     }
+    compositor_set_mode(display_mode);
+    g_vm.display_mode = display_mode;
 
     g_vm.state = VM_STATE_RUNNING;
     pthread_cond_broadcast(&g_vm_cond);
@@ -250,14 +305,27 @@ int vm_engine_resume(void) {
 }
 
 void vm_engine_send_touch(float x, float y, int action) {
-    compositor_handle_touch(x, y, action);
+    pthread_mutex_lock(&g_vm_mutex);
+    if (g_vm.state == VM_STATE_RUNNING) {
+        compositor_handle_touch(x, y, action);
+        g_vm.display_mode = compositor_get_mode();
+    }
+    pthread_mutex_unlock(&g_vm_mutex);
 }
 
 void vm_engine_set_display_mode(int mode) {
+    if (mode != MODE_MOBILE && mode != MODE_DESKTOP) return;
     pthread_mutex_lock(&g_vm_mutex);
     g_vm.display_mode = mode;
     compositor_set_mode(mode);
     pthread_mutex_unlock(&g_vm_mutex);
+}
+
+int vm_engine_get_display_mode(void) {
+    pthread_mutex_lock(&g_vm_mutex);
+    int mode = compositor_get_mode();
+    pthread_mutex_unlock(&g_vm_mutex);
+    return mode;
 }
 
 int vm_engine_get_state(void) {
@@ -269,10 +337,16 @@ int vm_engine_get_state(void) {
 
 uint64_t vm_engine_get_ram_usage(void) {
     pthread_mutex_lock(&g_vm_mutex);
-    uint64_t usage = (uint64_t)GUEST_RAM_SIZE;
+    uint64_t usage = sizeof(g_vm) + compositor_get_snapshot_size();
+    if (g_vm.ram) usage += g_vm.ram_size;
+    if (g_snapshot_ram) usage += GUEST_RAM_SIZE;
+    if (g_snapshot_compositor) usage += g_snapshot_compositor_size;
     int fb_w = 0, fb_h = 0;
-    display_bridge_get_fb(&fb_w, &fb_h);
-    usage += (uint64_t)(fb_w * fb_h * sizeof(uint32_t));
+    display_bridge_lock_fb();
+    if (display_bridge_get_fb(&fb_w, &fb_h)) {
+        usage += (uint64_t)fb_w * (uint64_t)fb_h * sizeof(uint32_t);
+    }
+    display_bridge_unlock_fb();
     pthread_mutex_unlock(&g_vm_mutex);
     return usage;
 }

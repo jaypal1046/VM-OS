@@ -46,7 +46,6 @@ object VmJniBridge {
      */
     @JvmStatic
     fun onGuestIpcMessage(command: String) {
-        Log.d(TAG, "Received guest IPC command: $command")
         ipcListener?.onGuestIpcMessage(command)
     }
 
@@ -60,6 +59,7 @@ object VmJniBridge {
     external fun nativeSetSurface(surface: Surface?): Boolean
     external fun nativeSendTouchInput(x: Float, y: Float, action: Int)
     external fun nativeSetDisplayMode(mode: Int)
+    external fun nativeGetDisplayMode(): Int
     external fun nativeSendSerialMessage(command: String)
     external fun nativeGetVmState(): Int
     external fun nativeGetRamUsage(): Long

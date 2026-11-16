@@ -1,9 +1,10 @@
 # SplitOS (VM-OS) - Project Handover Document
 
-> **Document Version:** 1.1.0 (Full Implementation Completed)  
+> **Document Version:** 1.1.0 (Historical Prototype Handover)
 > **Date:** November 16, 2026  
 > **Project Root Directory:** `C:\Jay\_Plugin\VM-OS`  
-> **Status:** All Milestones (Steps 1 through 4) Implemented & Verified  
+> **Status:** Prototype; historical verification claims below do not establish Android device reliability.
+> **Current limitations:** Host-compiled compositor, no guest CPU/kernel execution or guest isolation; metadata-only image; in-memory snapshots lost on process termination. Native memory estimate includes snapshot allocations and excludes Android/process overhead.
 > **Target Audience:** Developers, AI Agents, and Stakeholders  
 
 ---
@@ -13,8 +14,8 @@
 **SplitOS** is an embedded virtual operating system subsystem designed to run directly inside a standard Android host app without requiring root permissions. 
 
 ### Key Innovations:
-1. **The "Split" Architecture**: The Android host maintains ownership of mission-critical hardware (cellular radio, SIM cards, telephony, and SMS). The guest OS executes in an isolated sandbox.
-2. **Zero Interruption to Phone Calls**: Incoming calls and messages automatically overlay and ring via Android's native subsystem—the VM is never killed or frozen.
+1. **The "Split" Architecture**: The Android host maintains ownership of mission-critical hardware (cellular radio, SIM cards, telephony, and SMS). The environment executes in the Android host process without separate guest isolation.
+2. **Zero Interruption to Phone Calls**: Incoming calls and messages automatically overlay and ring via Android's native subsystem—background process survival requires device testing and is not guaranteed.
 3. **Dual Personality (Mobile + Desktop)**: Supports both touch-friendly fullscreen mobile applications and floating multi-window desktop applications with taskbar and mouse/keyboard navigation.
 4. **GitHub-First Distribution**: Pre-compiled release APKs and downloadable guest OS images are built and distributed directly via GitHub Actions and GitHub Releases.
 
@@ -144,8 +145,10 @@ Create the minimal guest operating system payload:
 1. **Lifecycle Test**: Start VM -> pause snapshot -> resume snapshot -> stop VM. Completed and verified with zero leaks.
 2. **Telephony Bridge Test**: Tap the Dialer app inside the guest OS -> verified `CALL:<number>` UART command dispatched to Android host gateway.
 3. **Dual Mode Test**: Toggle between Mobile and Desktop modes -> verified window manager resizing, title bar dragging, and Start menu toggling.
-4. **Memory Footprint**: Verified guest VM + framebuffer memory footprint is ~19.5 MB (strictly beneath the 64 MB ceiling).
+4. **Memory Footprint**: The historical ~19.5 MB estimate omitted snapshot buffers. RAM plus RAM snapshot plus framebuffer alone require ~35.5 MiB; core/compositor state adds overhead. Total Android process memory has not been measured.
 5. **GitHub CI/CD Test**: Configured `build-apk.yml` and `build-os-image.yml` workflows; tagged release `v1.0.0`.
+
+Historical test output (memory accounting has since changed):
 
 ```text
 ==========================================

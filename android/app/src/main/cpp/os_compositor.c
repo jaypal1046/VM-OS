@@ -117,6 +117,12 @@ void compositor_init(int initial_mode) {
     g_state.pointer_y = 640;
     g_state.drag_window_id = -1;
 
+    // Calculator default state
+    strcpy(g_state.calc_display, "0");
+    g_state.calc_acc = 0.0;
+    g_state.calc_op = '\0';
+    g_state.calc_new_entry = 1;
+
     // Terminal default history
     strcpy(g_state.term_history[0], "SplitOS Subsystem v1.0.0 [Ready]");
     strcpy(g_state.term_history[1], "Telephony & SMS Bridge: ONLINE");
@@ -127,12 +133,9 @@ void compositor_init(int initial_mode) {
     strcpy(g_state.sms_recipient, "+18005550199");
     strcpy(g_state.sms_message, "SplitOS: Mobile & Desktop running safely!");
 
-    // Default Dialed Number
-    strcpy(g_state.dialed_number, "911");
-    g_state.dialed_len = 3;
 
     // Setup Desktop Windows
-    g_state.window_count = 3;
+    g_state.window_count = 4;
 
     // Window 0: Phone Dialer
     g_state.windows[0].id = 0;
@@ -153,11 +156,11 @@ void compositor_init(int initial_mode) {
     g_state.windows[1].title = "SplitOS Terminal";
     g_state.windows[1].x = 350;
     g_state.windows[1].y = 80;
-    g_state.windows[1].w = 400;
+    g_state.windows[1].w = 340;
     g_state.windows[1].h = 280;
     g_state.windows[1].orig_x = 350;
     g_state.windows[1].orig_y = 80;
-    g_state.windows[1].orig_w = 400;
+    g_state.windows[1].orig_w = 340;
     g_state.windows[1].orig_h = 280;
     g_state.windows[1].is_visible = 1;
     g_state.windows[1].z_order = 1;
@@ -167,14 +170,28 @@ void compositor_init(int initial_mode) {
     g_state.windows[2].title = "System Monitor";
     g_state.windows[2].x = 350;
     g_state.windows[2].y = 380;
-    g_state.windows[2].w = 400;
+    g_state.windows[2].w = 340;
     g_state.windows[2].h = 220;
     g_state.windows[2].orig_x = 350;
     g_state.windows[2].orig_y = 380;
-    g_state.windows[2].orig_w = 400;
+    g_state.windows[2].orig_w = 340;
     g_state.windows[2].orig_h = 220;
     g_state.windows[2].is_visible = 1;
     g_state.windows[2].z_order = 2;
+
+    // Window 3: Calculator
+    g_state.windows[3].id = 3;
+    g_state.windows[3].title = "Calculator";
+    g_state.windows[3].x = 40;
+    g_state.windows[3].y = 480;
+    g_state.windows[3].w = 280;
+    g_state.windows[3].h = 210;
+    g_state.windows[3].orig_x = 40;
+    g_state.windows[3].orig_y = 480;
+    g_state.windows[3].orig_w = 280;
+    g_state.windows[3].orig_h = 210;
+    g_state.windows[3].is_visible = 1;
+    g_state.windows[3].z_order = 3;
 
     g_state.focused_window_id = 0;
 
@@ -243,6 +260,78 @@ static int is_inside(int px, int py, int rx, int ry, int rw, int rh) {
     return (px >= rx && px < rx + rw && py >= ry && py < ry + rh);
 }
 
+static void calc_press(char key) {
+    if (key == 'C') {
+        strcpy(g_state.calc_display, "0");
+        g_state.calc_acc = 0.0;
+        g_state.calc_op = '\0';
+        g_state.calc_new_entry = 1;
+        return;
+    }
+    if (key >= '0' && key <= '9') {
+        if (g_state.calc_new_entry || strcmp(g_state.calc_display, "0") == 0) {
+            g_state.calc_display[0] = key;
+            g_state.calc_display[1] = '\0';
+            g_state.calc_new_entry = 0;
+        } else {
+            size_t l = strlen(g_state.calc_display);
+            if (l < sizeof(g_state.calc_display) - 2) {
+                g_state.calc_display[l] = key;
+                g_state.calc_display[l + 1] = '\0';
+            }
+        }
+    } else if (key == '+' || key == '-' || key == '*' || key == '/') {
+        g_state.calc_acc = atof(g_state.calc_display);
+        g_state.calc_op = key;
+        g_state.calc_new_entry = 1;
+    } else if (key == '=' && g_state.calc_op != '\0') {
+        double cur = atof(g_state.calc_display);
+        if (g_state.calc_op == '+') g_state.calc_acc += cur;
+        else if (g_state.calc_op == '-') g_state.calc_acc -= cur;
+        else if (g_state.calc_op == '*') g_state.calc_acc *= cur;
+        else if (g_state.calc_op == '/') {
+            if (cur != 0.0) g_state.calc_acc /= cur;
+            else {
+                strcpy(g_state.calc_display, "Error");
+                g_state.calc_new_entry = 1;
+                return;
+            }
+        }
+        snprintf(g_state.calc_display, sizeof(g_state.calc_display), "%.15g", g_state.calc_acc);
+        g_state.calc_op = '\0';
+        g_state.calc_new_entry = 1;
+    }
+}
+
+static void term_add_line(const char* line) {
+    if (!line) return;
+    if (g_state.term_history_count < 8) {
+        strncpy(g_state.term_history[g_state.term_history_count++], line, 63);
+    } else {
+        for (int i = 0; i < 7; i++) {
+            strcpy(g_state.term_history[i], g_state.term_history[i + 1]);
+        }
+        strncpy(g_state.term_history[7], line, 63);
+    }
+}
+
+static void term_exec_cmd(const char* cmd) {
+    char echo[64];
+    snprintf(echo, sizeof(echo), "$ %s", cmd);
+    term_add_line(echo);
+
+    if (strcmp(cmd, "help") == 0) {
+        term_add_line("SplitOS Commands: help, status, mem, clear");
+    } else if (strcmp(cmd, "status") == 0) {
+        term_add_line("SplitOS 1.0.0 [Online] - Host Telephony Linked");
+    } else if (strcmp(cmd, "mem") == 0) {
+        term_add_line("Guest RAM: 16 MB | VRAM: 720x1280 32-bit RGBA");
+    } else if (strcmp(cmd, "clear") == 0) {
+        g_state.term_history_count = 0;
+
+    }
+}
+
 static void handle_dialpad_press(char key) {
     if (key == '<') {
         if (g_state.dialed_len > 0) {
@@ -264,10 +353,14 @@ static void handle_dialpad_press(char key) {
 }
 
 void compositor_handle_touch(float norm_x, float norm_y, int action) {
+    if (!(norm_x >= 0.0f && norm_x <= 1.0f && norm_y >= 0.0f && norm_y <= 1.0f) ||
+        action < 0 || action > 2) return;
     int fb_w = 720;
     int fb_h = 1280;
     int px = (int)(norm_x * fb_w);
     int py = (int)(norm_y * fb_h);
+    if (px == fb_w) px = fb_w - 1;
+    if (py == fb_h) py = fb_h - 1;
 
     g_state.pointer_x = px;
     g_state.pointer_y = py;
@@ -300,18 +393,20 @@ void compositor_handle_touch(float norm_x, float norm_y, int action) {
 
             // Check if inside Home Screen App Grid
             if (g_state.active_mobile_app == APP_NONE) {
-                int start_y = 140;
-                int icon_spacing = 90;
+                int start_y = 125;
+                int icon_spacing = 80;
 
-                if (is_inside(px, py, 60, start_y, fb_w - 120, 64)) {
+                if (is_inside(px, py, 60, start_y, fb_w - 120, 60)) {
                     g_state.active_mobile_app = APP_DIALER;
-                } else if (is_inside(px, py, 60, start_y + icon_spacing, fb_w - 120, 64)) {
+                } else if (is_inside(px, py, 60, start_y + icon_spacing, fb_w - 120, 60)) {
                     g_state.active_mobile_app = APP_MESSAGES;
-                } else if (is_inside(px, py, 60, start_y + icon_spacing * 2, fb_w - 120, 64)) {
+                } else if (is_inside(px, py, 60, start_y + icon_spacing * 2, fb_w - 120, 60)) {
                     g_state.active_mobile_app = APP_TERMINAL;
-                } else if (is_inside(px, py, 60, start_y + icon_spacing * 3, fb_w - 120, 64)) {
+                } else if (is_inside(px, py, 60, start_y + icon_spacing * 3, fb_w - 120, 60)) {
                     g_state.active_mobile_app = APP_NOTES;
-                } else if (is_inside(px, py, 60, start_y + icon_spacing * 4, fb_w - 120, 64)) {
+                } else if (is_inside(px, py, 60, start_y + icon_spacing * 4, fb_w - 120, 60)) {
+                    g_state.active_mobile_app = APP_CALCULATOR;
+                } else if (is_inside(px, py, 60, start_y + icon_spacing * 5, fb_w - 120, 60)) {
                     g_state.active_mobile_app = APP_SETTINGS;
                 }
             } else if (g_state.active_mobile_app == APP_DIALER) {
@@ -355,6 +450,40 @@ void compositor_handle_touch(float norm_x, float norm_y, int action) {
                     char cmd[256];
                     snprintf(cmd, sizeof(cmd), "SMS:%s:%s", g_state.sms_recipient, g_state.sms_message);
                     uart_ipc_guest_send_line(cmd);
+                }
+            } else if (g_state.active_mobile_app == APP_TERMINAL) {
+                const char* quick_cmds[4] = {"help", "status", "mem", "clear"};
+                int q_start_x = 40;
+                int q_w = 120;
+                for (int i = 0; i < 4; i++) {
+                    int qx = q_start_x + (i % 3) * (q_w + 10);
+                    int qy = 550 + (i / 3) * 55;
+                    if (is_inside(px, py, qx, qy, q_w, 45)) {
+                        term_exec_cmd(quick_cmds[i]);
+                        return;
+                    }
+                }
+            } else if (g_state.active_mobile_app == APP_CALCULATOR) {
+                static const char calc_keys[4][4] = {
+                    {'7', '8', '9', '/'},
+                    {'4', '5', '6', '*'},
+                    {'1', '2', '3', '-'},
+                    {'C', '0', '=', '+'}
+                };
+                int start_y = 210;
+                int btn_w = 110;
+                int btn_h = 75;
+                int start_x = 90;
+
+                for (int r = 0; r < 4; r++) {
+                    for (int c = 0; c < 4; c++) {
+                        int bx = start_x + c * (btn_w + 15);
+                        int by = start_y + r * (btn_h + 15);
+                        if (is_inside(px, py, bx, by, btn_w, btn_h)) {
+                            calc_press(calc_keys[r][c]);
+                            return;
+                        }
+                    }
                 }
             }
         } else {
@@ -433,6 +562,24 @@ void compositor_handle_touch(float norm_x, float norm_y, int action) {
                             handle_dialpad_press('C');
                             return;
                         }
+                    } else if (win->id == 3) { // Calculator window
+                        static const char ckeys[4][4] = {
+                            {'7', '8', '9', '/'},
+                            {'4', '5', '6', '*'},
+                            {'1', '2', '3', '-'},
+                            {'C', '0', '=', '+'}
+                        };
+                        int cbw = 54, cbh = 26;
+                        for (int r = 0; r < 4; r++) {
+                            for (int c = 0; c < 4; c++) {
+                                int bx = win->x + 15 + c * (cbw + 8);
+                                int by = win->y + 78 + r * (cbh + 5);
+                                if (is_inside(px, py, bx, by, cbw, cbh)) {
+                                    calc_press(ckeys[r][c]);
+                                    return;
+                                }
+                            }
+                        }
                     }
                     return;
                 }
@@ -485,17 +632,31 @@ static void render_incoming_call_banner(uint32_t* fb, int fb_w, int fb_h) {
 }
 
 static void render_mobile_home(uint32_t* fb, int fb_w, int fb_h) {
-    draw_string(fb, fb_w, fb_h, 60, 80, "Applications", COLOR_TEXT_MUTED, 2);
+    draw_string(fb, fb_w, fb_h, 60, 75, "SplitOS Applications", COLOR_TEXT_MUTED, 2);
 
-    const char* app_names[5] = {"1. Phone Dialer", "2. SMS Messages", "3. System Terminal", "4. Quick Notes", "5. Settings & Info"};
-    const uint32_t app_colors[5] = {COLOR_ACCENT_GREEN, COLOR_ACCENT_BLUE, COLOR_SURFACE_DARK, COLOR_ACCENT_AMBER, COLOR_PANEL_BG};
+    const char* app_names[6] = {
+        "1. Phone Dialer",
+        "2. SMS Messages",
+        "3. System Terminal",
+        "4. Quick Notes",
+        "5. Calculator",
+        "6. Settings & Info"
+    };
+    const uint32_t app_colors[6] = {
+        COLOR_ACCENT_GREEN,
+        COLOR_ACCENT_BLUE,
+        COLOR_SURFACE_DARK,
+        COLOR_ACCENT_AMBER,
+        COLOR_ACCENT_BLUE,
+        COLOR_PANEL_BG
+    };
 
-    int start_y = 140;
-    int spacing = 90;
-    for (int i = 0; i < 5; i++) {
-        draw_rect(fb, fb_w, fb_h, 60, start_y + i * spacing, fb_w - 120, 64, app_colors[i]);
-        draw_rect_outline(fb, fb_w, fb_h, 60, start_y + i * spacing, fb_w - 120, 64, COLOR_TEXT_MUTED);
-        draw_string(fb, fb_w, fb_h, 90, start_y + i * spacing + 22, app_names[i], COLOR_WHITE, 2);
+    int start_y = 125;
+    int spacing = 80;
+    for (int i = 0; i < 6; i++) {
+        draw_rect(fb, fb_w, fb_h, 60, start_y + i * spacing, fb_w - 120, 60, app_colors[i]);
+        draw_rect_outline(fb, fb_w, fb_h, 60, start_y + i * spacing, fb_w - 120, 60, COLOR_TEXT_MUTED);
+        draw_string(fb, fb_w, fb_h, 90, start_y + i * spacing + 20, app_names[i], COLOR_WHITE, 2);
     }
 }
 
@@ -553,13 +714,60 @@ static void render_mobile_messages(uint32_t* fb, int fb_w, int fb_h) {
 static void render_mobile_terminal(uint32_t* fb, int fb_w, int fb_h) {
     draw_string(fb, fb_w, fb_h, 60, 60, "< Back to Apps", COLOR_ACCENT_BLUE, 2);
 
-    draw_rect(fb, fb_w, fb_h, 40, 110, fb_w - 80, 480, COLOR_BLACK);
-    draw_rect_outline(fb, fb_w, fb_h, 40, 110, fb_w - 80, 480, COLOR_ACCENT_GREEN);
+    draw_rect(fb, fb_w, fb_h, 40, 110, fb_w - 80, 420, COLOR_BLACK);
+    draw_rect_outline(fb, fb_w, fb_h, 40, 110, fb_w - 80, 420, COLOR_ACCENT_GREEN);
 
     for (int i = 0; i < g_state.term_history_count; i++) {
-        draw_string(fb, fb_w, fb_h, 60, 140 + i * 36, g_state.term_history[i], COLOR_ACCENT_GREEN, 2);
+        draw_string(fb, fb_w, fb_h, 60, 135 + i * 36, g_state.term_history[i], COLOR_ACCENT_GREEN, 2);
     }
-    draw_string(fb, fb_w, fb_h, 60, 140 + g_state.term_history_count * 36, "$ ready", COLOR_WHITE, 2);
+    draw_string(fb, fb_w, fb_h, 60, 135 + g_state.term_history_count * 36, "$ _", COLOR_WHITE, 2);
+
+    // Quick Command Buttons at bottom of terminal
+    const char* quick_cmds[4] = {"help", "status", "mem", "clear"};
+    int q_start_x = 40;
+    int q_w = 120;
+    for (int i = 0; i < 4; i++) {
+        int qx = q_start_x + (i % 3) * (q_w + 10);
+        int qy = 550 + (i / 3) * 55;
+        draw_rect(fb, fb_w, fb_h, qx, qy, q_w, 45, COLOR_SURFACE_DARK);
+        draw_rect_outline(fb, fb_w, fb_h, qx, qy, q_w, 45, COLOR_ACCENT_BLUE);
+        draw_string(fb, fb_w, fb_h, qx + 12, qy + 14, quick_cmds[i], COLOR_WHITE, 1);
+    }
+}
+
+static void render_mobile_calculator(uint32_t* fb, int fb_w, int fb_h) {
+    draw_string(fb, fb_w, fb_h, 60, 60, "< Back to Apps", COLOR_ACCENT_BLUE, 2);
+
+    // Display
+    draw_rect(fb, fb_w, fb_h, 60, 110, fb_w - 120, 70, COLOR_SURFACE_DARK);
+    draw_rect_outline(fb, fb_w, fb_h, 60, 110, fb_w - 120, 70, COLOR_TEXT_MUTED);
+    draw_string(fb, fb_w, fb_h, 80, 130, g_state.calc_display, COLOR_WHITE, 3);
+
+    // 4x4 Keypad
+    static const char calc_keys[4][4] = {
+        {'7', '8', '9', '/'},
+        {'4', '5', '6', '*'},
+        {'1', '2', '3', '-'},
+        {'C', '0', '=', '+'}
+    };
+    int start_y = 210;
+    int btn_w = 110;
+    int btn_h = 75;
+    int start_x = 90;
+
+    for (int r = 0; r < 4; r++) {
+        for (int c = 0; c < 4; c++) {
+            int bx = start_x + c * (btn_w + 15);
+            int by = start_y + r * (btn_h + 15);
+            char key = calc_keys[r][c];
+            uint32_t bg = (key == '=' || key == '+' || key == '-' || key == '*' || key == '/') ? COLOR_ACCENT_AMBER :
+                          (key == 'C') ? COLOR_ACCENT_RED : COLOR_SURFACE_DARK;
+            draw_rect(fb, fb_w, fb_h, bx, by, btn_w, btn_h, bg);
+            draw_rect_outline(fb, fb_w, fb_h, bx, by, btn_w, btn_h, COLOR_TEXT_MUTED);
+            char ks[2] = {key, '\0'};
+            draw_string(fb, fb_w, fb_h, bx + btn_w / 2 - 12, by + btn_h / 2 - 12, ks, COLOR_WHITE, 3);
+        }
+    }
 }
 
 static void render_mobile_nav_bar(uint32_t* fb, int fb_w, int fb_h) {
@@ -636,6 +844,26 @@ static void render_desktop(uint32_t* fb, int fb_w, int fb_h) {
 
             snprintf(info, sizeof(info), "Kernel Ticks: %u", g_state.ticks);
             draw_string(fb, fb_w, fb_h, win->x + 20, win->y + 140, info, COLOR_TEXT_MUTED, 2);
+        } else if (win->id == 3) { // Calculator
+            draw_rect(fb, fb_w, fb_h, win->x + 15, win->y + 40, win->w - 30, 30, COLOR_BLACK);
+            draw_string(fb, fb_w, fb_h, win->x + 25, win->y + 46, g_state.calc_display, COLOR_WHITE, 2);
+
+            static const char ckeys[4][4] = {
+                {'7', '8', '9', '/'},
+                {'4', '5', '6', '*'},
+                {'1', '2', '3', '-'},
+                {'C', '0', '=', '+'}
+            };
+            int cbw = 54, cbh = 26;
+            for (int r = 0; r < 4; r++) {
+                for (int c = 0; c < 4; c++) {
+                    int bx = win->x + 15 + c * (cbw + 8);
+                    int by = win->y + 78 + r * (cbh + 5);
+                    draw_rect(fb, fb_w, fb_h, bx, by, cbw, cbh, COLOR_PANEL_BG);
+                    char ks[2] = {ckeys[r][c], '\0'};
+                    draw_string(fb, fb_w, fb_h, bx + cbw / 2 - 4, by + 6, ks, COLOR_WHITE, 1);
+                }
+            }
         }
     }
 
@@ -682,6 +910,9 @@ void compositor_render(uint32_t* fb, int width, int height) {
                 break;
             case APP_TERMINAL:
                 render_mobile_terminal(fb, width, height);
+                break;
+            case APP_CALCULATOR:
+                render_mobile_calculator(fb, width, height);
                 break;
             default:
                 render_mobile_home(fb, width, height);

@@ -31,10 +31,25 @@ jobs:
       - name: Build Guest OS Image Asset
         run: python os/build_guest_os.py
 
+      - name: Run Native Virtualization Core Tests
+        run: |
+          gcc -Wall -Wextra \
+            -Iandroid/app/src/main/cpp \
+            -Iandroid/app/src/main/cpp/display \
+            -Iandroid/app/src/main/cpp/serial \
+            -Iandroid/app/src/main/cpp/vm_core \
+            android/app/src/main/cpp/display/display_bridge.c \
+            android/app/src/main/cpp/serial/uart_ipc.c \
+            android/app/src/main/cpp/os_compositor.c \
+            android/app/src/main/cpp/vm_core/vm_engine.c \
+            android/app/src/main/cpp/test_vm_core.c \
+            -o test_vm_core -lpthread
+          ./test_vm_core
+
       - name: Build Release APK
         run: |
           cd android
-          ./gradlew assembleRelease
+          ./gradlew testDebugUnitTest assembleRelease
 
       - name: Create GitHub Release and Upload APK
         uses: softprops/action-gh-release@v2

@@ -17,7 +17,8 @@ typedef enum {
     APP_MESSAGES,
     APP_TERMINAL,
     APP_NOTES,
-    APP_SETTINGS
+    APP_SETTINGS,
+    APP_CALCULATOR
 } guest_app_id_t;
 
 typedef struct {
@@ -63,6 +64,12 @@ typedef struct {
     // SMS state
     char sms_recipient[32];
     char sms_message[128];
+
+    // Calculator state
+    char calc_display[32];
+    double calc_acc;
+    char calc_op;
+    int calc_new_entry;
 
     // Terminal state
     char term_history[8][64];

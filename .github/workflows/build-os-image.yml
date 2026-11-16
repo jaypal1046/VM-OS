@@ -20,6 +20,12 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Run Guest OS Unit Tests
+        run: |
+          cd os
+          gcc -Wall -Wextra -Ikernel -Icompositor -Iapps apps/calculator.c apps/shell.c apps/apps.c compositor/compositor.c test_guest_os.c -o test_guest
+          ./test_guest
+
       - name: Compile and Package Guest OS Image
         run: |
           python os/build_guest_os.py

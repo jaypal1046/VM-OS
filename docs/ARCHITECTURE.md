@@ -1,6 +1,6 @@
 # SplitOS System Architecture & Technical Specification
 
-This document details the architectural design, communication protocols, and distribution mechanics for **SplitOS**.
+This document describes the target architecture for **SplitOS**. Current implementation runs a host-compiled C compositor in the Android process; it has no guest CPU execution, independent kernel boot, or guest application isolation. The image builder packages metadata, not executable firmware. Pause/resume snapshots exist only in memory. Calls and SMS open Android confirmation screens; direct CALL_PHONE and SEND_SMS permissions are not requested. Memory reporting estimates core state, RAM, snapshot buffers, and framebuffer; it excludes Android/process overhead.
 
 ---
 
@@ -62,7 +62,7 @@ This document details the architectural design, communication protocols, and dis
 ### 3.1 Foreground Service & Process Persistence
 * Android aggressively terminates background apps when under memory pressure.
 * SplitOS runs within an Android `ForegroundService` with a low-overhead ongoing notification (`SplitOS is running`).
-* If an incoming telephone call arrives, Android's `InCallService` or default dialer appears on top. The `ForegroundService` ensures the VM state remains intact in memory without being killed.
+* If an incoming telephone call arrives, Android's `InCallService` or default dialer appears on top. The foreground service requests background execution; process survival and call behavior are not guaranteed. Process termination loses in-memory snapshots.
 
 ### 3.2 Display Pipeline
 1. The guest OS writes to a designated memory region (Linear Framebuffer, e.g. 1920x1080 32-bit RGBA).

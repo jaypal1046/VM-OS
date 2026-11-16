@@ -15,7 +15,6 @@ import android.net.Uri
 import android.os.BatteryManager
 import android.os.Build
 import android.telephony.PhoneStateListener
-import android.telephony.SmsManager
 import android.telephony.TelephonyCallback
 import android.telephony.TelephonyManager
 import android.util.Log
@@ -48,6 +47,8 @@ class TelephonyBridge(private val context: Context) : VmJniBridge.GuestIpcListen
     private var connectivityManager: ConnectivityManager? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private var telephonyManager: TelephonyManager? = null
+    private var telephonyCallback: TelephonyCallback? = null
+    private var phoneStateListener: PhoneStateListener? = null
 
     fun start() {
         if (isListening) return
@@ -69,6 +70,7 @@ class TelephonyBridge(private val context: Context) : VmJniBridge.GuestIpcListen
         VmJniBridge.setGuestIpcListener(null)
         unregisterBatteryMonitor()
         unregisterNetworkMonitor()
+        unregisterPhoneStateMonitor()
 
         Log.i(TAG, "TelephonyBridge stopped.")
     }
@@ -103,65 +105,27 @@ class TelephonyBridge(private val context: Context) : VmJniBridge.GuestIpcListen
                     modeChangeListener?.onModeChanged(isDesktop)
                 }
                 else -> {
-                    Log.d(TAG, "Unhandled guest command: $trimmed")
+                    Log.d(TAG, "Unhandled guest command")
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error handling guest IPC command '$trimmed': ${e.message}", e)
+            Log.e(TAG, "Guest command failed: ${e.javaClass.simpleName}")
         }
     }
 
     private fun handleCallRequest(number: String) {
-        Log.i(TAG, "Guest OS requested call to: $number")
         val cleanNumber = number.replace("[^0-9+*#]".toRegex(), "")
         if (cleanNumber.isEmpty()) return
-
-        val hasCallPermission = ContextCompat.checkSelfPermission(
-            appContext,
-            android.Manifest.permission.CALL_PHONE
-        ) == PackageManager.PERMISSION_GRANTED
-
-        val intent = if (hasCallPermission) {
-            Intent(Intent.ACTION_CALL, Uri.parse("tel:$cleanNumber")).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK
-            }
-        } else {
-            // Safe fallback to dialer without requiring CALL_PHONE runtime permission
-            Intent(Intent.ACTION_DIAL, Uri.parse("tel:$cleanNumber")).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK
-            }
+        val intent = Intent(Intent.ACTION_DIAL, Uri.fromParts("tel", cleanNumber, null)).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK
         }
         appContext.startActivity(intent)
     }
 
     private fun handleSmsRequest(number: String, message: String) {
-        Log.i(TAG, "Guest OS requested SMS to $number: $message")
         val cleanNumber = number.replace("[^0-9+]".toRegex(), "")
         if (cleanNumber.isEmpty()) return
-
-        val hasSmsPermission = ContextCompat.checkSelfPermission(
-            appContext,
-            android.Manifest.permission.SEND_SMS
-        ) == PackageManager.PERMISSION_GRANTED
-
-        if (hasSmsPermission) {
-            try {
-                @Suppress("DEPRECATION")
-                val smsManager = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    appContext.getSystemService(SmsManager::class.java)
-                } else {
-                    SmsManager.getDefault()
-                }
-                smsManager.sendTextMessage(cleanNumber, null, message, null, null)
-                Log.i(TAG, "SMS dispatched successfully to $cleanNumber")
-                return
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed direct SMS dispatch, falling back to intent: ${e.message}")
-            }
-        }
-
-        // Fallback: Launch native SMS compose intent
-        val intent = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:$cleanNumber")).apply {
+        val intent = Intent(Intent.ACTION_SENDTO, Uri.fromParts("smsto", cleanNumber, null)).apply {
             putExtra("sms_body", message)
             flags = Intent.FLAG_ACTIVITY_NEW_TASK
         }
@@ -275,28 +239,44 @@ class TelephonyBridge(private val context: Context) : VmJniBridge.GuestIpcListen
 
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                telephonyManager?.registerTelephonyCallback(
-                    appContext.mainExecutor,
-                    object : TelephonyCallback(), TelephonyCallback.CallStateListener {
-                        override fun onCallStateChanged(state: Int) {
-                            handleCallStateChange(state, null)
-                        }
+                val callback = object : TelephonyCallback(), TelephonyCallback.CallStateListener {
+                    override fun onCallStateChanged(state: Int) {
+                        handleCallStateChange(state, null)
                     }
-                )
+                }
+                telephonyCallback = callback
+                telephonyManager?.registerTelephonyCallback(appContext.mainExecutor, callback)
             } else {
                 @Suppress("DEPRECATION")
-                telephonyManager?.listen(
-                    object : PhoneStateListener() {
-                        @Deprecated("Deprecated in Java")
-                        override fun onCallStateChanged(state: Int, phoneNumber: String?) {
-                            handleCallStateChange(state, phoneNumber)
-                        }
-                    },
-                    @Suppress("DEPRECATION") PhoneStateListener.LISTEN_CALL_STATE
-                )
+                val listener = object : PhoneStateListener() {
+                    @Deprecated("Deprecated in Java")
+                    override fun onCallStateChanged(state: Int, phoneNumber: String?) {
+                        handleCallStateChange(state, phoneNumber)
+                    }
+                }
+                phoneStateListener = listener
+                @Suppress("DEPRECATION")
+                telephonyManager?.listen(listener, PhoneStateListener.LISTEN_CALL_STATE)
             }
         } catch (e: Exception) {
             Log.w(TAG, "Error registering telephony listener: ${e.message}")
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun unregisterPhoneStateMonitor() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                telephonyCallback?.let { telephonyManager?.unregisterTelephonyCallback(it) }
+            } else {
+                phoneStateListener?.let { telephonyManager?.listen(it, PhoneStateListener.LISTEN_NONE) }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Error unregistering telephony listener: ${e.message}")
+        } finally {
+            telephonyCallback = null
+            phoneStateListener = null
+            telephonyManager = null
         }
     }
 
@@ -317,7 +297,6 @@ class TelephonyBridge(private val context: Context) : VmJniBridge.GuestIpcListen
     }
 
     fun sendHostEvent(event: String) {
-        Log.d(TAG, "Sending host event to guest VM: $event")
         VmJniBridge.nativeSendSerialMessage("$event\n")
     }
 }

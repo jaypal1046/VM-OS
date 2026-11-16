@@ -8,21 +8,26 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.os.Binder
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
+import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import com.splitos.R
 import com.splitos.bridge.TelephonyBridge
 import com.splitos.jni.VmJniBridge
 import com.splitos.ui.MainActivity
+import com.splitos.updater.UpdateManager
+import java.io.File
+import java.io.FileOutputStream
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 
 /**
  * SplitOS Persistent Life-Support Daemon.
- * Runs as a foreground service to ensure Android does not kill or throttle
- * the VM execution process during telephone calls, SMS events, or app switching.
+ * Requests foreground execution during calls, SMS events, and app switching.
+ * Android may still terminate the process; snapshots are held only in memory.
  */
 class VmForegroundService : Service() {
 
@@ -38,11 +43,6 @@ class VmForegroundService : Service() {
         const val ACTION_RESUME = "com.splitos.action.RESUME"
     }
 
-    inner class LocalBinder : Binder() {
-        fun getService(): VmForegroundService = this@VmForegroundService
-    }
-
-    private val binder = LocalBinder()
     private var wakeLock: PowerManager.WakeLock? = null
     private var telephonyBridge: TelephonyBridge? = null
     private var isVmStarted = false
@@ -51,7 +51,6 @@ class VmForegroundService : Service() {
         super.onCreate()
         Log.i(TAG, "Creating VmForegroundService...")
         createNotificationChannel()
-        acquireWakeLock()
         telephonyBridge = TelephonyBridge(applicationContext).apply {
             start()
         }
@@ -83,10 +82,10 @@ class VmForegroundService : Service() {
             ACTION_RESUME -> resumeVmExecution()
         }
 
-        return START_STICKY
+        return if (action == ACTION_STOP || !isVmStarted) START_NOT_STICKY else START_STICKY
     }
 
-    override fun onBind(intent: Intent?): IBinder = binder
+    override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
         Log.i(TAG, "Destroying VmForegroundService...")
@@ -98,18 +97,50 @@ class VmForegroundService : Service() {
 
     fun startVmExecution(): Boolean {
         if (!isVmStarted) {
-            isVmStarted = VmJniBridge.nativeStartVm()
+            isVmStarted = try {
+                val image = prepareGuestImage()
+                VmJniBridge.nativeInitVm(image.absolutePath) && VmJniBridge.nativeStartVm()
+            } catch (e: Exception) {
+                Log.e(TAG, "Could not initialize SplitOS", e)
+                false
+            }
             Log.i(TAG, "VM start execution result: $isVmStarted")
+        }
+        if (isVmStarted) acquireWakeLock()
+        else {
+            Toast.makeText(this, "Could not start SplitOS", Toast.LENGTH_LONG).show()
+            stopVmExecution()
         }
         return isVmStarted
     }
 
-    fun stopVmExecution(): Boolean {
-        if (isVmStarted) {
-            VmJniBridge.nativeStopVm()
-            isVmStarted = false
-            Log.i(TAG, "VM execution stopped.")
+    private fun prepareGuestImage(): File {
+        val image = File(filesDir, "guest_os.bin")
+        if (!image.exists()) {
+            val staged = File.createTempFile("guest_os-", ".tmp", filesDir)
+            try {
+                assets.open("guest_os.bin").use { input ->
+                    FileOutputStream(staged).use { output ->
+                        input.copyTo(output)
+                        output.fd.sync()
+                    }
+                }
+                UpdateManager.validateGuestImage(staged)
+                Files.move(staged.toPath(), image.toPath(), StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING)
+            } finally {
+                staged.delete()
+            }
         }
+        UpdateManager.validateGuestImage(image)
+        return image
+    }
+
+    fun stopVmExecution(): Boolean {
+        VmJniBridge.nativeStopVm()
+        isVmStarted = false
+        releaseWakeLock()
+        Log.i(TAG, "VM execution stopped.")
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
         return true
@@ -117,12 +148,16 @@ class VmForegroundService : Service() {
 
     fun pauseVmExecution(): Boolean {
         Log.i(TAG, "Pausing VM execution snapshot...")
-        return VmJniBridge.nativePauseVm()
+        val paused = VmJniBridge.nativePauseVm()
+        if (paused) releaseWakeLock()
+        return paused
     }
 
     fun resumeVmExecution(): Boolean {
         Log.i(TAG, "Resuming VM execution from snapshot...")
-        return VmJniBridge.nativeResumeVm()
+        val resumed = VmJniBridge.nativeResumeVm()
+        if (resumed) acquireWakeLock()
+        return resumed
     }
 
     fun getRamUsageBytes(): Long = VmJniBridge.nativeGetRamUsage()

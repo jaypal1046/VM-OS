@@ -200,3 +200,10 @@ Java_com_splitos_jni_VmJniBridge_nativeGetRamUsage(JNIEnv* env, jobject thiz) {
     (void)thiz;
     return (jlong)vm_engine_get_ram_usage();
 }
+
+JNIEXPORT jint JNICALL
+Java_com_splitos_jni_VmJniBridge_nativeGetDisplayMode(JNIEnv* env, jobject thiz) {
+    (void)env;
+    (void)thiz;
+    return (jint)vm_engine_get_display_mode();
+}

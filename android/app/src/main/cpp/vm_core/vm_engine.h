@@ -35,8 +35,10 @@ int vm_engine_resume(void);
 
 void vm_engine_send_touch(float x, float y, int action);
 void vm_engine_set_display_mode(int mode);
+int vm_engine_get_display_mode(void);
 
 int vm_engine_get_state(void);
+// Estimate of core state, RAM, snapshots and framebuffer; excludes Android/process overhead.
 uint64_t vm_engine_get_ram_usage(void);
 
 #ifdef __cplusplus

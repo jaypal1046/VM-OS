@@ -1,6 +1,6 @@
 # SplitOS 📱💻
 
-> **A Hybrid Mobile & Desktop Micro-OS Virtualization Subsystem for Android**
+> **An Experimental Mobile & Desktop Environment for Android**
 
 [![GitHub Release](https://img.shields.io/github/v/release/your-username/split-os?include_prereleases&style=flat-square)](https://github.com/your-username/split-os/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
@@ -10,10 +10,10 @@
 
 ## 🌟 Overview
 
-**SplitOS** is an embedded virtual operating system designed to run directly inside an Android application without requiring root privileges. It provides a flexible **split architecture**:
+**SplitOS** is an experimental OS-style environment running inside an Android application without root privileges. The current runtime executes a native compositor and built-in tools in the host process. It does not emulate a guest CPU, boot an independent kernel, or isolate guest applications. It provides a flexible **split architecture**:
 
 1. **Host (Android)** handles cellular calls, SMS, notifications, and battery management uninterrupted in the background.
-2. **Guest (SplitOS)** runs an isolated, lightweight operating system capable of running both **touch-first mobile apps** and **multi-window desktop apps**.
+2. **Environment (SplitOS)** provides built-in tools through mobile and desktop layouts. Arbitrary Android, Linux, and desktop applications are not supported.
 3. **Seamless Control**: Users can launch, pause, snapshot, and stop the environment on demand just like any standard app or launcher.
 
 ---
@@ -25,16 +25,18 @@
   * **Desktop Mode**: Multi-window interface with title bars, draggable/resizable windows, taskbar, and virtual trackpad/mouse support.
 * **Split Telephony Bridge**:
   * Phone calls and text messages trigger native Android overlays.
-  * Incoming calls will **never** be dropped or blocked while inside the guest OS.
-  * Guest OS can trigger outgoing calls and SMS via an IPC serial bridge.
-* **Zero Root Required**: Runs purely within standard Android user-space using an embedded NDK micro-virtualization engine.
-* **Instant Pause & Resume**: Save RAM snapshots to disk on demand so you can stop the OS anytime and resume without losing state.
-* **External Display & DeX Integration**: Automatically switch to desktop mode when connected to an external monitor via USB-C or HDMI.
+  * Android retains control of cellular calls; call behavior and background survival require device testing.
+  * Guest requests open Android’s dialer or SMS composer for user confirmation. The app does not place calls or send SMS directly.
+* **Zero Root Required**: Runs within the standard Android app process using native C rendering.
+* **Instant Pause & Resume**: Pause and resume using in-memory snapshots within the same process. Snapshots are not written to disk and cannot recover state after process termination.
+* **External Display & DeX Integration**: Planned automatic desktop-mode switching when an external display connects.
 * **GitHub Distribution**: Automated builds for both host APKs and guest OS image releases directly from GitHub Actions.
 
 ---
 
 ## 🏗️ Architecture
+
+The diagram below describes the target architecture. CPU emulation, MMU, an independent guest kernel, and guest application isolation are not implemented. `guest_os.bin` currently contains metadata and padding, not executable firmware.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -126,11 +128,16 @@ cd split-os/android
 ## 🗺️ Roadmap
 
 - [x] Architecture design & system documentation
-- [ ] Minimal NDK Micro-VM Core integration
-- [ ] Android Host UI with Start / Stop / State snapshotting
-- [ ] Bidirectional IPC bridge for phone call forwarding
-- [ ] Adaptive Window Compositor (Mobile full-screen + Desktop floating windows)
-- [ ] GitHub Actions release pipeline for continuous APK delivery
+- [x] Native compositor/runtime integration (`libvmcore.so`)
+- [ ] Guest CPU emulation, kernel boot, and application isolation
+- [ ] Persistent snapshots and recovery after process termination
+- [x] Android Host UI with Start / Stop / State snapshotting
+- [x] Bidirectional IPC bridge for phone call & SMS forwarding
+- [x] Adaptive Window Compositor (Mobile full-screen + Desktop floating windows)
+- [x] GitHub Actions release pipeline for continuous APK & OS image delivery
+- [ ] USB-C / External Display auto-detection with DeX convergence
+- [ ] In-App GitHub Releases Updater & Image Downloader
+- [ ] Hardware-accelerated OpenGL ES 3.0 graphics passthrough
 
 ---
 

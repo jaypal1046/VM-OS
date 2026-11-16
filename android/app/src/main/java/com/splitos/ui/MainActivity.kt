@@ -2,66 +2,57 @@ package com.splitos.ui
 
 import android.Manifest
 import android.annotation.SuppressLint
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.content.ServiceConnection
 import android.content.pm.PackageManager
+import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
-import android.os.IBinder
 import android.os.Looper
 import android.util.Log
+import android.view.Display
 import android.view.MotionEvent
 import android.view.SurfaceHolder
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
 import com.splitos.R
 import com.splitos.databinding.ActivityMainBinding
 import com.splitos.jni.VmJniBridge
 import com.splitos.service.VmForegroundService
+import com.splitos.updater.UpdateManager
+import kotlinx.coroutines.launch
 import java.io.File
-import java.io.FileOutputStream
 
 /**
  * SplitOS Main Viewport & Host Controller Activity.
- * Bridges SurfaceView hardware-accelerated rendering, handles touch input,
- * controls VM lifecycle, and toggles Mobile vs. Desktop convergence layouts.
+ * Bridges SurfaceView hardware-accelerated rendering, handles touch input & virtual trackpad,
+ * controls VM lifecycle, auto-detects external displays (DeX/HDMI), and checks for updates.
  */
 class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
     companion object {
         private const val TAG = "MainActivity"
-        private const val GUEST_OS_ASSET = "guest_os.bin"
     }
 
     private lateinit var binding: ActivityMainBinding
-    private var vmService: VmForegroundService? = null
-    private var isBound = false
-    private var isDesktopMode = false
     private var isTrackpadActive = false
+
+    // Virtual Trackpad relative pointer tracking
+    private var lastTouchX = 0f
+    private var lastTouchY = 0f
+    private var virtualPointerX = 0.5f
+    private var virtualPointerY = 0.5f
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private var ramMonitorRunnable: Runnable? = null
 
-    private val serviceConnection = object : ServiceConnection {
-        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
-            val binder = service as VmForegroundService.LocalBinder
-            vmService = binder.getService()
-            isBound = true
-            Log.i(TAG, "Bound to VmForegroundService.")
-            updateUiState()
-        }
-
-        override fun onServiceDisconnected(name: ComponentName?) {
-            vmService = null
-            isBound = false
-            Log.i(TAG, "Unbound from VmForegroundService.")
-            updateUiState()
-        }
-    }
+    private lateinit var displayManager: DisplayManager
+    private var displayListener: DisplayManager.DisplayListener? = null
+    private val updateManager by lazy { UpdateManager(this) }
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -78,27 +69,15 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
         setupSurfaceView()
         setupControls()
+        setupExternalDisplayMonitor()
         requestSystemPermissions()
-        extractGuestOsAssetIfNeeded()
         startRamMonitor()
-    }
-
-    override fun onStart() {
-        super.onStart()
-        val serviceIntent = Intent(this, VmForegroundService::class.java)
-        bindService(serviceIntent, serviceConnection, Context.BIND_AUTO_CREATE)
-    }
-
-    override fun onStop() {
-        if (isBound) {
-            unbindService(serviceConnection)
-            isBound = false
-        }
-        super.onStop()
+        checkForUpdatesSilently()
     }
 
     override fun onDestroy() {
         stopRamMonitor()
+        displayListener?.let { displayManager.unregisterDisplayListener(it) }
         super.onDestroy()
     }
 
@@ -114,17 +93,43 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             val surfaceHeight = view.height.toFloat()
 
             if (surfaceWidth > 0 && surfaceHeight > 0) {
-                val action = when (event.actionMasked) {
-                    MotionEvent.ACTION_DOWN -> VmJniBridge.TOUCH_ACTION_DOWN
-                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> VmJniBridge.TOUCH_ACTION_UP
-                    MotionEvent.ACTION_MOVE -> VmJniBridge.TOUCH_ACTION_MOVE
-                    else -> -1
-                }
+                if (isTrackpadActive) {
+                    // Virtual Trackpad: Relative pointer motion
+                    when (event.actionMasked) {
+                        MotionEvent.ACTION_DOWN -> {
+                            lastTouchX = event.x
+                            lastTouchY = event.y
+                            VmJniBridge.nativeSendTouchInput(virtualPointerX, virtualPointerY, VmJniBridge.TOUCH_ACTION_DOWN)
+                        }
+                        MotionEvent.ACTION_MOVE -> {
+                            val dx = (event.x - lastTouchX) / surfaceWidth
+                            val dy = (event.y - lastTouchY) / surfaceHeight
+                            virtualPointerX = (virtualPointerX + dx * 1.5f).coerceIn(0f, 1f)
+                            virtualPointerY = (virtualPointerY + dy * 1.5f).coerceIn(0f, 1f)
+                            lastTouchX = event.x
+                            lastTouchY = event.y
+                            VmJniBridge.nativeSendTouchInput(virtualPointerX, virtualPointerY, VmJniBridge.TOUCH_ACTION_MOVE)
+                        }
+                        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                            VmJniBridge.nativeSendTouchInput(virtualPointerX, virtualPointerY, VmJniBridge.TOUCH_ACTION_UP)
+                        }
+                    }
+                } else {
+                    // Direct Absolute Touch
+                    val action = when (event.actionMasked) {
+                        MotionEvent.ACTION_DOWN -> VmJniBridge.TOUCH_ACTION_DOWN
+                        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> VmJniBridge.TOUCH_ACTION_UP
+                        MotionEvent.ACTION_MOVE -> VmJniBridge.TOUCH_ACTION_MOVE
+                        else -> -1
+                    }
 
-                if (action != -1) {
-                    val normX = (event.x / surfaceWidth).coerceIn(0f, 1f)
-                    val normY = (event.y / surfaceHeight).coerceIn(0f, 1f)
-                    VmJniBridge.nativeSendTouchInput(normX, normY, action)
+                    if (action != -1) {
+                        val normX = (event.x / surfaceWidth).coerceIn(0f, 1f)
+                        val normY = (event.y / surfaceHeight).coerceIn(0f, 1f)
+                        virtualPointerX = normX
+                        virtualPointerY = normY
+                        VmJniBridge.nativeSendTouchInput(normX, normY, action)
+                    }
                 }
             }
             true
@@ -146,24 +151,20 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         binding.btnPause.setOnClickListener {
             val currentState = VmJniBridge.nativeGetVmState()
             if (currentState == VmJniBridge.STATE_RUNNING) {
-                vmService?.pauseVmExecution() ?: VmJniBridge.nativePauseVm()
+                startService(Intent(this, VmForegroundService::class.java).apply {
+                    action = VmForegroundService.ACTION_PAUSE
+                })
             } else if (currentState == VmJniBridge.STATE_PAUSED) {
-                vmService?.resumeVmExecution() ?: VmJniBridge.nativeResumeVm()
+                startService(Intent(this, VmForegroundService::class.java).apply {
+                    action = VmForegroundService.ACTION_RESUME
+                })
             }
             updateUiState()
         }
 
         // UI Mode toggle: Mobile vs Desktop
         binding.btnToggleMode.setOnClickListener {
-            isDesktopMode = !isDesktopMode
-            val mode = if (isDesktopMode) VmJniBridge.MODE_DESKTOP else VmJniBridge.MODE_MOBILE
-            VmJniBridge.nativeSetDisplayMode(mode)
-            binding.btnToggleMode.text = if (isDesktopMode) {
-                getString(R.string.mode_desktop)
-            } else {
-                getString(R.string.mode_mobile)
-            }
-            Log.i(TAG, "Switched display mode to: ${if (isDesktopMode) "Desktop" else "Mobile"}")
+            switchDisplayMode(VmJniBridge.nativeGetDisplayMode() != VmJniBridge.MODE_DESKTOP)
         }
 
         // Virtual Trackpad toggle
@@ -173,19 +174,78 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                 this,
                 if (isTrackpadActive) R.color.accent_blue else R.color.text_secondary
             )
+            val msg = if (isTrackpadActive) "Virtual Trackpad Active" else "Direct Touch Active"
+            Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
             Log.i(TAG, "Virtual trackpad toggled: $isTrackpadActive")
         }
     }
 
-    private fun startVmSubsystem() {
-        val assetPath = extractGuestOsAssetIfNeeded()
-        VmJniBridge.nativeInitVm(assetPath)
+    private fun switchDisplayMode(desktop: Boolean) {
+        val mode = if (desktop) VmJniBridge.MODE_DESKTOP else VmJniBridge.MODE_MOBILE
+        VmJniBridge.nativeSetDisplayMode(mode)
+        updateUiState()
+    }
 
+    private fun setupExternalDisplayMonitor() {
+        displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+        displayListener = object : DisplayManager.DisplayListener {
+            override fun onDisplayAdded(displayId: Int) {
+                Log.i(TAG, "External display connected: ID $displayId")
+                runOnUiThread {
+                    Toast.makeText(this@MainActivity, "External Display Detected: Switching to Desktop Mode", Toast.LENGTH_SHORT).show()
+                    switchDisplayMode(true)
+                }
+            }
+
+            override fun onDisplayRemoved(displayId: Int) {
+                Log.i(TAG, "External display removed: ID $displayId")
+                runOnUiThread {
+                    val displays = displayManager.displays
+                    val hasSecondary = displays.any { it.displayId != Display.DEFAULT_DISPLAY }
+                    if (!hasSecondary) {
+                        Toast.makeText(this@MainActivity, "External Display Disconnected: Returning to Mobile Mode", Toast.LENGTH_SHORT).show()
+                        switchDisplayMode(false)
+                    }
+                }
+            }
+
+            override fun onDisplayChanged(displayId: Int) {}
+        }
+        displayManager.registerDisplayListener(displayListener, mainHandler)
+
+        // Check if secondary display is already connected on startup
+        val displays = displayManager.displays
+        if (displays.any { it.displayId != Display.DEFAULT_DISPLAY }) {
+            Log.i(TAG, "Secondary display detected on boot, activating Desktop Mode")
+            switchDisplayMode(true)
+        }
+    }
+
+    private fun checkForUpdatesSilently() {
+        lifecycleScope.launch {
+            updateManager.checkForUpdates(object : UpdateManager.UpdateCallback {
+                override fun onUpdateAvailable(info: UpdateManager.ReleaseInfo) {
+                    Log.i(TAG, "New SplitOS update found on GitHub: ${info.tagName}")
+                }
+                override fun onNoUpdateAvailable() {
+                    Log.d(TAG, "SplitOS is up to date.")
+                }
+                override fun onDownloadProgress(percent: Int) {}
+                override fun onUpdateComplete(file: File) {
+                    Log.i(TAG, "SplitOS updated: ${file.absolutePath}")
+                }
+                override fun onError(message: String) {
+                    Log.d(TAG, "Update check notice: $message")
+                }
+            })
+        }
+    }
+
+    private fun startVmSubsystem() {
         val serviceIntent = Intent(this, VmForegroundService::class.java).apply {
             action = VmForegroundService.ACTION_START
         }
         ContextCompat.startForegroundService(this, serviceIntent)
-        vmService?.startVmExecution() ?: VmJniBridge.nativeStartVm()
 
         updateUiState()
     }
@@ -195,12 +255,15 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             action = VmForegroundService.ACTION_STOP
         }
         startService(serviceIntent)
-        vmService?.stopVmExecution() ?: VmJniBridge.nativeStopVm()
 
         updateUiState()
     }
 
     private fun updateUiState() {
+        binding.btnToggleMode.text = getString(
+            if (VmJniBridge.nativeGetDisplayMode() == VmJniBridge.MODE_DESKTOP) R.string.mode_desktop
+            else R.string.mode_mobile
+        )
         val state = VmJniBridge.nativeGetVmState()
         when (state) {
             VmJniBridge.STATE_RUNNING -> {
@@ -259,27 +322,8 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         }
     }
 
-    private fun extractGuestOsAssetIfNeeded(): String {
-        val destFile = File(filesDir, GUEST_OS_ASSET)
-        if (!destFile.exists()) {
-            try {
-                assets.open(GUEST_OS_ASSET).use { input ->
-                    FileOutputStream(destFile).use { output ->
-                        input.copyTo(output)
-                    }
-                }
-                Log.i(TAG, "Copied guest OS binary to: ${destFile.absolutePath}")
-            } catch (e: Exception) {
-                Log.w(TAG, "Could not extract $GUEST_OS_ASSET from assets: ${e.message}")
-            }
-        }
-        return destFile.absolutePath
-    }
-
     private fun requestSystemPermissions() {
         val permissions = mutableListOf(
-            Manifest.permission.CALL_PHONE,
-            Manifest.permission.SEND_SMS,
             Manifest.permission.READ_PHONE_STATE
         )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {

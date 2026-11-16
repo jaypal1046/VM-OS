@@ -31,6 +31,7 @@ typedef struct {
 typedef struct {
     char line[1024];
     size_t len;
+    int discarding;
     pthread_mutex_t mutex;
 } line_buffer_t;
 
@@ -51,6 +52,7 @@ void uart_ipc_init(uart_ipc_callback_t callback) {
 
     pthread_mutex_init(&g_guest_to_host_tx.mutex, NULL);
     g_guest_to_host_tx.len = 0;
+    g_guest_to_host_tx.discarding = 0;
 
     LOGI("UART IPC initialized.");
 }
@@ -72,7 +74,7 @@ void uart_ipc_guest_write(const char* data, size_t len) {
     for (size_t i = 0; i < len; i++) {
         char c = data[i];
         if (c == '\n' || c == '\r') {
-            if (g_guest_to_host_tx.len > 0) {
+            if (g_guest_to_host_tx.len > 0 && !g_guest_to_host_tx.discarding) {
                 g_guest_to_host_tx.line[g_guest_to_host_tx.len] = '\0';
 
                 // Dispatch to host
@@ -81,14 +83,18 @@ void uart_ipc_guest_write(const char* data, size_t len) {
                 pthread_mutex_unlock(&g_callback_mutex);
 
                 if (cb) {
-                    LOGD("Dispatching guest command to host: %s", g_guest_to_host_tx.line);
                     cb(g_guest_to_host_tx.line);
                 }
-                g_guest_to_host_tx.len = 0;
             }
+            g_guest_to_host_tx.len = 0;
+            g_guest_to_host_tx.discarding = 0;
         } else {
-            if (g_guest_to_host_tx.len < sizeof(g_guest_to_host_tx.line) - 1) {
+            if (!g_guest_to_host_tx.discarding && c != '\0' &&
+                g_guest_to_host_tx.len < sizeof(g_guest_to_host_tx.line) - 1) {
                 g_guest_to_host_tx.line[g_guest_to_host_tx.len++] = c;
+            } else {
+                // Reject the entire command rather than dispatching a partial request.
+                g_guest_to_host_tx.discarding = 1;
             }
         }
     }
@@ -168,8 +174,8 @@ int uart_ipc_guest_read_line(char* out_buf, size_t max_len) {
     }
 
     size_t copy_len = line_len < max_len - 1 ? line_len : max_len - 1;
-    for (size_t i = 0; i < copy_len; i++) {
-        out_buf[i] = g_host_to_guest_rx.data[g_host_to_guest_rx.tail];
+    for (size_t i = 0; i < line_len; i++) {
+        if (i < copy_len) out_buf[i] = g_host_to_guest_rx.data[g_host_to_guest_rx.tail];
         g_host_to_guest_rx.tail = (g_host_to_guest_rx.tail + 1) % UART_BUFFER_SIZE;
         g_host_to_guest_rx.count--;
     }
