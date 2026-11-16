@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">SplitOS</string>
+    <string name="vm_running_title">SplitOS Subsystem Active</string>
+    <string name="vm_running_desc">Guest OS running safely in background. Telephony active.</string>
+    <string name="btn_start">Start OS</string>
+    <string name="btn_stop">Stop OS</string>
+    <string name="btn_pause">Pause</string>
+    <string name="btn_resume">Resume</string>
+    <string name="mode_mobile">Mobile Mode</string>
+    <string name="mode_desktop">Desktop Mode</string>
+</resources>
